@@ -187,9 +187,9 @@ export async function POST(request: Request) {
     const body = await request.json()
     const { phone_number_id, waba_id, access_token, verify_token, pin } = body
 
-    if (!access_token || !phone_number_id) {
+    if (!phone_number_id) {
       return NextResponse.json(
-        { error: 'access_token and phone_number_id are required' },
+        { error: 'phone_number_id is required' },
         { status: 400 }
       )
     }
@@ -235,12 +235,51 @@ export async function POST(request: Request) {
       )
     }
 
+    // Look up any pre-existing row for this account so we know whether
+    // this number is already registered with Meta — if so we can skip
+    // /register when the user didn't provide a PIN this time around.
+    const { data: existing } = await supabase
+      .from('whatsapp_config')
+      .select('id, registered_at, phone_number_id, access_token, verify_token')
+      .eq('account_id', accountId)
+      .maybeSingle()
+
+    // The settings form never gets the saved access_token back from the
+    // server, so it renders blank on every page load. Same problem we hit
+    // with verify_token (see below): a save meant only to update the
+    // webhook verify_token, waba_id, or PIN would otherwise force the user
+    // to also re-paste the access token or have the save rejected. Reuse
+    // the stored one — decrypted for the Meta calls below, and re-stored
+    // as-is (still encrypted) since it hasn't changed.
+    let effectiveAccessToken: string
+    if (access_token) {
+      effectiveAccessToken = access_token
+    } else if (existing?.access_token) {
+      try {
+        effectiveAccessToken = decrypt(existing.access_token)
+      } catch (err) {
+        console.error('[whatsapp/config POST] Stored token decryption failed:', err)
+        return NextResponse.json(
+          {
+            error:
+              'The stored access token cannot be decrypted with the current ENCRYPTION_KEY. Please re-enter the Access Token to save changes.',
+          },
+          { status: 400 }
+        )
+      }
+    } else {
+      return NextResponse.json(
+        { error: 'access_token is required' },
+        { status: 400 }
+      )
+    }
+
     // Verify credentials with Meta BEFORE saving
     let phoneInfo
     try {
       phoneInfo = await verifyPhoneNumber({
         phoneNumberId: phone_number_id,
-        accessToken: access_token,
+        accessToken: effectiveAccessToken,
       })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown Meta API error'
@@ -255,8 +294,15 @@ export async function POST(request: Request) {
     let encryptedAccessToken: string
     let encryptedVerifyToken: string | null
     try {
-      encryptedAccessToken = encrypt(access_token)
-      encryptedVerifyToken = verify_token ? encrypt(verify_token) : null
+      encryptedAccessToken = access_token ? encrypt(access_token) : existing!.access_token
+      // The settings form never gets the saved verify_token back from the
+      // server (it's never returned by GET, same as access_token), so its
+      // field renders blank on every page load. Without this fallback, any
+      // save made without retyping it (e.g. just rotating the PIN) would
+      // send verify_token: null and silently wipe out a working webhook
+      // subscription — see the "field goes blank / webhook stops working"
+      // reports. Only overwrite when the caller actually supplied a new one.
+      encryptedVerifyToken = verify_token ? encrypt(verify_token) : (existing?.verify_token ?? null)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown encryption error'
       console.error('Encryption failed:', message)
@@ -268,15 +314,6 @@ export async function POST(request: Request) {
         { status: 500 }
       )
     }
-
-    // Look up any pre-existing row for this account so we know whether
-    // this number is already registered with Meta — if so we can skip
-    // /register when the user didn't provide a PIN this time around.
-    const { data: existing } = await supabase
-      .from('whatsapp_config')
-      .select('id, registered_at, phone_number_id')
-      .eq('account_id', accountId)
-      .maybeSingle()
 
     const sameNumber =
       existing?.phone_number_id === phone_number_id &&
@@ -313,7 +350,7 @@ export async function POST(request: Request) {
         try {
           await registerPhoneNumber({
             phoneNumberId: phone_number_id,
-            accessToken: access_token,
+            accessToken: effectiveAccessToken,
             pin,
           })
           registeredAt = new Date().toISOString()
@@ -338,7 +375,7 @@ export async function POST(request: Request) {
       try {
         await subscribeWabaToApp({
           wabaId: waba_id,
-          accessToken: access_token,
+          accessToken: effectiveAccessToken,
         })
         subscribedAppsAt = new Date().toISOString()
       } catch (err) {

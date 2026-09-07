@@ -76,6 +76,7 @@ export function WhatsAppConfig() {
   const [verifyToken, setVerifyToken] = useState('');
   const [pin, setPin] = useState('');
   const [tokenEdited, setTokenEdited] = useState(false);
+  const [verifyTokenEdited, setVerifyTokenEdited] = useState(false);
 
   // Inbound-media mirror (issue #466). Unlike everything else on this
   // page it is NOT part of handleSave: that path insists on re-entering
@@ -135,9 +136,15 @@ export function WhatsAppConfig() {
         setPhoneNumberId(data.phone_number_id || '');
         setWabaId(data.waba_id || '');
         setAccessToken(MASKED_TOKEN);
-        setVerifyToken('');
+        // Same "never returned in plaintext" story as access_token — but
+        // unlike access_token this field has no other value to show on
+        // load, so an unconditional blank reads as "nothing saved" even
+        // right after a successful save. Show the masked placeholder
+        // whenever the row actually has one stored.
+        setVerifyToken(data.verify_token ? MASKED_TOKEN : '');
         setPin('');
         setTokenEdited(false);
+        setVerifyTokenEdited(false);
         // Undefined on a row read before migration 039 — treat that as
         // on, matching the webhook's own default.
         setMirrorMedia(data.mirror_inbound_media !== false);
@@ -149,6 +156,7 @@ export function WhatsAppConfig() {
         setVerifyToken('');
         setPin('');
         setTokenEdited(false);
+        setVerifyTokenEdited(false);
         setMirrorMedia(true);
       }
       // Clear any stale probe result when reloading the row.
@@ -246,7 +254,6 @@ export function WhatsAppConfig() {
       const payload: Record<string, unknown> = {
         phone_number_id: phoneNumberId.trim(),
         waba_id: wabaId.trim() || null,
-        verify_token: verifyToken.trim() || null,
         // Optional — only sent when the user filled it in. The server
         // requires it on first save or when changing numbers; for a
         // simple token rotation, leaving it blank skips re-register.
@@ -255,15 +262,15 @@ export function WhatsAppConfig() {
 
       if (tokenEdited && accessToken !== MASKED_TOKEN && accessToken.trim()) {
         payload.access_token = accessToken.trim();
-      } else if (config) {
-        // Existing config — reuse stored encrypted token by decrypting on the
-        // server. But our POST handler requires an access_token to verify
-        // with Meta. If the user didn't change the token, we need to signal
-        // that. Simplest: require token re-entry if they're updating.
-        toast.error('Please re-enter the Access Token to save changes');
-        setSaving(false);
-        return;
       }
+      // Otherwise omit it — the server reuses (and decrypts) the stored
+      // access_token for the Meta calls when none is supplied.
+
+      if (verifyTokenEdited && verifyToken !== MASKED_TOKEN && verifyToken.trim()) {
+        payload.verify_token = verifyToken.trim();
+      }
+      // Otherwise omit it too, so the server keeps whatever verify_token
+      // is already saved instead of wiping it with null.
 
       const res = await fetch('/api/whatsapp/config', {
         method: 'POST',
@@ -359,6 +366,11 @@ export function WhatsAppConfig() {
         method: 'GET',
       });
       const data = (await res.json()) as RegistrationProbe;
+      // fetchConfig() unconditionally clears registrationProbe (it's the
+      // right call when switching accounts / on initial load), so it must
+      // run — and finish clearing — before we set the probe we actually
+      // want shown, or the freshly fetched checks never render.
+      if (accountId) await fetchConfig(accountId);
       setRegistrationProbe(data);
       if (data.live) {
         toast.success('Number is fully wired — Meta is delivering events.');
@@ -368,7 +380,6 @@ export function WhatsAppConfig() {
           { duration: 8000 },
         );
       }
-      if (accountId) await fetchConfig(accountId);
     } catch (err) {
       console.error('verify-registration failed:', err);
       toast.error('Could not reach the verification endpoint.');
@@ -399,6 +410,7 @@ export function WhatsAppConfig() {
       setAccessToken('');
       setVerifyToken('');
       setTokenEdited(false);
+      setVerifyTokenEdited(false);
       setConnectionStatus('disconnected');
       setResetReason(null);
       setStatusMessage('');
@@ -666,12 +678,26 @@ export function WhatsAppConfig() {
               <Input
                 placeholder={t('webhookVerifyTokenPlaceholder')}
                 value={verifyToken}
-                onChange={(e) => setVerifyToken(e.target.value)}
+                onChange={(e) => {
+                  setVerifyToken(e.target.value);
+                  setVerifyTokenEdited(true);
+                }}
+                onFocus={() => {
+                  if (verifyToken === MASKED_TOKEN) {
+                    setVerifyToken('');
+                    setVerifyTokenEdited(true);
+                  }
+                }}
                 className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
               />
               <p className="text-xs text-muted-foreground">
                 {t('webhookVerifyTokenHint')}
               </p>
+              {config && !verifyTokenEdited && verifyToken === MASKED_TOKEN && (
+                <p className="text-xs text-muted-foreground">
+                  {t('verifyTokenHidden')}
+                </p>
+              )}
             </div>
 
             <div className="space-y-2">

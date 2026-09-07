@@ -1497,6 +1497,7 @@
       "webhookVerifyToken": "Webhook Verify Token",
       "webhookVerifyTokenPlaceholder": "Create a custom verify token",
       "webhookVerifyTokenHint": "A custom string you create. Must match the token you set in Meta webhook settings.",
+      "verifyTokenHidden": "Token is hidden for security. Re-enter it to change it.",
       "twoStepPin": "Two-step verification PIN",
       "optional": "(optional)",
       "pinPlaceholder": "6-digit PIN from Meta WhatsApp Manager",
