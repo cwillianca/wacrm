@@ -74,6 +74,8 @@ export function AiConfig() {
   const [maxPerConversation, setMaxPerConversation] = useState(3);
   // Empty string = leave unassigned (shared queue).
   const [handoffAgentId, setHandoffAgentId] = useState('');
+  // Empty string = no WhatsApp notification on handoff.
+  const [handoffNotifyPhone, setHandoffNotifyPhone] = useState('');
   const [members, setMembers] = useState<AccountMember[]>([]);
 
   // Guard keyed on the account (not a bare boolean) so an in-place
@@ -100,6 +102,7 @@ export function AiConfig() {
         setAutoReplyEnabled(data.auto_reply_enabled);
         setMaxPerConversation(data.auto_reply_max_per_conversation ?? 3);
         setHandoffAgentId(data.handoff_agent_id ?? '');
+        setHandoffNotifyPhone(data.handoff_notify_phone ?? '');
         setHasStoredKey(Boolean(data.has_key));
         setApiKey(data.has_key ? MASKED_KEY : '');
         setKeyEdited(false);
@@ -151,6 +154,7 @@ export function AiConfig() {
     auto_reply_enabled: autoReplyEnabled,
     auto_reply_max_per_conversation: maxPerConversation,
     handoff_agent_id: handoffAgentId || null,
+    handoff_notify_phone: handoffNotifyPhone.trim() || null,
   });
 
   const handleTest = async () => {
@@ -482,6 +486,21 @@ export function AiConfig() {
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="ai-notify-phone">{t('handoffNotifyPhone')}</Label>
+              <p className="text-xs text-muted-foreground">
+                {t('handoffNotifyPhoneDesc')}
+              </p>
+              <Input
+                id="ai-notify-phone"
+                type="tel"
+                placeholder={t('handoffNotifyPhonePlaceholder')}
+                value={handoffNotifyPhone}
+                onChange={(e) => setHandoffNotifyPhone(e.target.value)}
+                disabled={disabled || !autoReplyEnabled}
+              />
             </div>
           </CardContent>
         </Card>

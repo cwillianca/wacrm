@@ -474,11 +474,28 @@ function ConversationItem({
       {/* Content */}
       <div className="min-w-0 flex-1">
         <div className="flex items-center justify-between gap-2">
-          <span className="truncate text-sm font-medium text-foreground">
+          <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
             {displayName}
           </span>
           <span className="shrink-0 text-[10px] text-muted-foreground">{timeAgo}</span>
         </div>
+        {contact?.tags && contact.tags.length > 0 && (
+          <div className="mt-1 flex flex-wrap items-center gap-1">
+            {contact.tags.map((tag) => (
+              <span
+                key={tag.id}
+                title={tag.name}
+                className="max-w-24 truncate rounded-full px-1.5 py-0.5 text-[10px] font-medium"
+                style={{
+                  backgroundColor: tag.color + '20',
+                  color: tag.color,
+                }}
+              >
+                {tag.name}
+              </span>
+            ))}
+          </div>
+        )}
         <div className="mt-0.5 flex items-center justify-between gap-2">
           <p className="truncate text-xs text-muted-foreground">
             {conversation.last_message_text || t("noMessagesYet")}
