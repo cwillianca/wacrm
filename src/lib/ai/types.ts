@@ -29,6 +29,10 @@ export interface AiConfig {
    *  knowledge base is embedded and semantic retrieval turns on; when
    *  null, retrieval falls back to lexical full-text search. */
   embeddingsApiKey: string | null
+  /** Phone number (digits, optional leading +) to notify via WhatsApp
+   *  template whenever the bot hands a conversation off. Null disables
+   *  the notification. */
+  handoffNotifyPhone: string | null
 }
 
 /** A single conversation turn in the shape both providers accept. */

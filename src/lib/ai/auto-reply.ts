@@ -1,3 +1,4 @@
+import type { SupabaseClient } from '@supabase/supabase-js'
 import { supabaseAdmin } from './admin-client'
 import { loadAiConfig } from './config'
 import { buildConversationContext } from './context'
@@ -5,10 +6,83 @@ import { retrieveKnowledge } from './knowledge'
 import { generateReply } from './generate'
 import { buildSystemPrompt } from './defaults'
 import { buildHandoffSummary } from './handoff'
+import { generateHandoffSummary } from './summary'
+import { notifyHandoff } from './notify-handoff'
+import { addContactTagAndDispatch } from '@/lib/contacts/tag-events'
 import { logAiUsage } from './usage'
 import { latestUserMessage } from './query'
+import type { AiConfig, ChatMessage } from './types'
 import { engineSendText } from '@/lib/flows/meta-send'
 import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit'
+
+/**
+ * Common end-of-automation step: disable further auto-replies on this
+ * thread, route it to a human, leave an internal note, and — when the
+ * account configured a `handoffNotifyPhone` and/or has any contact tags
+ * defined — ask the model for a written summary and/or a best-fit tag
+ * classification (one call covers both, so having both features on
+ * doesn't double the token spend). Shared by the two ways a
+ * conversation ends up here: the model explicitly asking to hand off,
+ * and the reply cap being reached on what was otherwise a normal send.
+ */
+async function finalizeHandoff(args: {
+  db: SupabaseClient
+  accountId: string
+  conversationId: string
+  contactId: string
+  config: AiConfig
+  messages: ChatMessage[]
+  replyCount: number
+  assignedAgentId: string | null
+}): Promise<void> {
+  const { db, accountId, conversationId, contactId, config, messages, replyCount, assignedAgentId } =
+    args
+
+  const note = buildHandoffSummary({ messages, replyCount })
+  const update: Record<string, unknown> = {
+    ai_autoreply_disabled: true,
+    ai_handoff_summary: note,
+  }
+  // Only set the assignee when a target is configured AND the thread
+  // isn't already owned — never stomp an existing human assignment.
+  if (config.handoffAgentId && !assignedAgentId) {
+    update.assigned_agent_id = config.handoffAgentId
+  }
+  await db.from('conversations').update(update).eq('id', conversationId)
+
+  // Classifying into an account tag only makes sense if the account
+  // has defined any — an AI-invented tag name would have nothing to
+  // attach to. Skip the whole analysis call when neither feature is
+  // in play so a plain handoff (no notify phone, no tags) costs
+  // nothing extra on the account's key.
+  const { data: accountTags } = await db
+    .from('tags')
+    .select('id, name')
+    .eq('account_id', accountId)
+  const tagOptions = (accountTags ?? []).map((t) => t.name as string)
+
+  if (!config.handoffNotifyPhone && tagOptions.length === 0) return
+
+  const { summary, tagNames } = await generateHandoffSummary(config, messages, tagOptions)
+
+  if (config.handoffNotifyPhone && summary) {
+    await notifyHandoff({ accountId, phone: config.handoffNotifyPhone, summary })
+  }
+
+  for (const tagName of tagNames) {
+    const matched = (accountTags ?? []).find(
+      (t) => (t.name as string).toLowerCase() === tagName.toLowerCase(),
+    )
+    if (matched) {
+      await addContactTagAndDispatch({
+        db,
+        accountId,
+        contactId,
+        tagId: matched.id as string,
+      })
+    }
+  }
+}
 
 interface DispatchArgs {
   /** Tenancy key — drives config, contact, and whatsapp_config lookups. */
@@ -134,26 +208,19 @@ export async function dispatchInboundToAiReply(
 
     if (handoff || !text) {
       // The model can't (or shouldn't) answer — stop auto-replying on
-      // this thread and hand it to a human. We (a) pause the bot here
-      // (sticky until re-enabled), (b) route the conversation to the
-      // configured handoff agent — null leaves it in the shared queue —
-      // and (c) leave a short internal note so whoever picks it up has
-      // context. Assigning fires the `on_conversation_assigned` trigger,
-      // which notifies the agent.
-      const summary = buildHandoffSummary({
+      // this thread and hand it to a human (sticky until re-enabled).
+      // Assigning fires the `on_conversation_assigned` trigger, which
+      // notifies the agent.
+      await finalizeHandoff({
+        db,
+        accountId,
+        conversationId,
+        contactId,
+        config,
         messages,
         replyCount: conv.ai_reply_count ?? 0,
+        assignedAgentId: conv.assigned_agent_id,
       })
-      const update: Record<string, unknown> = {
-        ai_autoreply_disabled: true,
-        ai_handoff_summary: summary,
-      }
-      // Only set the assignee when a target is configured AND the thread
-      // isn't already owned — never stomp an existing human assignment.
-      if (config.handoffAgentId && !conv.assigned_agent_id) {
-        update.assigned_agent_id = config.handoffAgentId
-      }
-      await db.from('conversations').update(update).eq('id', conversationId)
       return
     }
 
@@ -187,6 +254,26 @@ export async function dispatchInboundToAiReply(
       text,
       aiGenerated: true,
     })
+
+    // `claimed === true` means this send consumed the slot at
+    // `conv.ai_reply_count + 1` (the claim's own UPDATE incremented
+    // exactly once — no extra read needed). When that's the last
+    // allowed slot, this was the bot's final word on the thread even
+    // though it never emitted the handoff sentinel — finalize the same
+    // way so it isn't left silently un-handed-off (see the module doc).
+    const newReplyCount = (conv.ai_reply_count ?? 0) + 1
+    if (newReplyCount >= config.autoReplyMaxPerConversation) {
+      await finalizeHandoff({
+        db,
+        accountId,
+        conversationId,
+        contactId,
+        config,
+        messages,
+        replyCount: newReplyCount,
+        assignedAgentId: conv.assigned_agent_id,
+      })
+    }
   } catch (err) {
     console.error('[ai auto-reply] dispatch failed:', err)
   }

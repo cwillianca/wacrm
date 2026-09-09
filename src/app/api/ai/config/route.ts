@@ -9,6 +9,7 @@ import { encrypt, decrypt } from '@/lib/whatsapp/encryption'
 import { validateAiCredentials } from '@/lib/ai/validate'
 import { embedTexts } from '@/lib/ai/embeddings'
 import { AiError, type AiProvider } from '@/lib/ai/types'
+import { sanitizePhoneForMeta, isValidE164 } from '@/lib/whatsapp/phone-utils'
 
 function bad(message: string) {
   return NextResponse.json({ error: message }, { status: 400 })
@@ -30,7 +31,7 @@ export async function GET() {
       // `api_key` is selected only to derive `has_key` — it is stripped
       // out below and never returned to the client.
       .select(
-        'provider, model, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, api_key, embeddings_api_key',
+        'provider, model, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, handoff_notify_phone, api_key, embeddings_api_key',
       )
       .eq('account_id', accountId)
       .maybeSingle()
@@ -114,6 +115,23 @@ export async function POST(request: Request) {
       handoffAgentId = rawHandoff
     }
 
+    // Phone to notify (via WhatsApp template) whenever the bot hands a
+    // conversation off. Same "absent leaves it unchanged" contract as
+    // handoff_agent_id above.
+    const rawNotifyPhone =
+      typeof body.handoff_notify_phone === 'string'
+        ? body.handoff_notify_phone.trim()
+        : ''
+    const notifyPhoneProvided = 'handoff_notify_phone' in body
+    let handoffNotifyPhone: string | null = null
+    if (rawNotifyPhone) {
+      const digits = sanitizePhoneForMeta(rawNotifyPhone)
+      if (!isValidE164(digits)) {
+        return bad('handoff_notify_phone must be a valid phone number')
+      }
+      handoffNotifyPhone = digits
+    }
+
     const rawKey = typeof body.api_key === 'string' ? body.api_key.trim() : ''
 
     // Embeddings key (optional, for semantic KB search): a non-empty
@@ -167,6 +185,7 @@ export async function POST(request: Request) {
           autoReplyMaxPerConversation: maxPer,
           handoffAgentId: null,
           embeddingsApiKey: null,
+          handoffNotifyPhone: null,
         })
       } catch (err) {
         if (err instanceof AiError) {
@@ -209,6 +228,7 @@ export async function POST(request: Request) {
     // Only touch the handoff target when the form actually sent the field,
     // so a partial save (e.g. flipping a toggle) doesn't wipe it.
     if (handoffProvided) shared.handoff_agent_id = handoffAgentId
+    if (notifyPhoneProvided) shared.handoff_notify_phone = handoffNotifyPhone
     if (rawEmbeddingsKey) {
       shared.embeddings_api_key = encrypt(rawEmbeddingsKey)
     } else if (clearEmbeddingsKey) {
