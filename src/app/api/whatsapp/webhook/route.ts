@@ -1,7 +1,7 @@
 import { NextResponse, after } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
-import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
+import { getMediaUrl, downloadMedia, sendTextMessage } from '@/lib/whatsapp/meta-api'
 import { mirrorInboundMedia } from '@/lib/whatsapp/mirror-inbound-media'
 import { normalizePhone } from '@/lib/whatsapp/phone-utils'
 import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
@@ -315,7 +315,8 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
           // Default ON: the column is NOT NULL DEFAULT TRUE, but a row
           // read before migration 039 lands would have it undefined,
           // and losing attachments is the failure mode worth avoiding.
-          config.mirror_inbound_media !== false
+          config.mirror_inbound_media !== false,
+          phoneNumberId
         )
       }
     }
@@ -586,9 +587,45 @@ async function processMessage(
   accessToken: string,
   // Per-account opt-out for the inbound-media mirror (migration 039).
   // See parseMessageContent for what it turns off.
-  mirrorMedia: boolean
+  mirrorMedia: boolean,
+  phoneNumberId: string
 ) {
   const senderPhone = normalizePhone(message.from)
+
+  // Testing-only escape hatch: a secret keyword (not documented to
+  // customers) wipes the contact so the next inbound message starts a
+  // completely fresh lead — no prior conversation/messages/tags to bias
+  // the bot or the reply-cap counter. `contacts` cascades to
+  // conversations/messages/contact_tags (migration 001); flow_runs and
+  // automation logs just get contact_id set to NULL, which is fine for
+  // a discarded test run. Checked before any contact/conversation is
+  // created so it never leaves a stray row behind.
+  const RESET_COMMAND = '#reset@'
+  if (
+    message.type === 'text' &&
+    message.text?.body?.trim().toLowerCase() === RESET_COMMAND
+  ) {
+    const existing = await findExistingContact(supabaseAdmin(), accountId, senderPhone)
+    if (existing) {
+      const { error: deleteError } = await supabaseAdmin()
+        .from('contacts')
+        .delete()
+        .eq('id', existing.id)
+      if (deleteError) {
+        console.error('[webhook] #reset@ delete failed:', deleteError.message)
+      }
+    }
+    await sendTextMessage({
+      phoneNumberId,
+      accessToken,
+      to: senderPhone,
+      text: existing
+        ? 'Conversa reiniciada. Pode mandar sua primeira mensagem.'
+        : 'Nenhuma conversa anterior encontrada — já pode começar.',
+    })
+    return
+  }
+
   const contactName = contact.profile.name
 
   // Find or create contact
