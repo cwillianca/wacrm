@@ -109,25 +109,52 @@ const nextConfig: NextConfig = {
    *   came back 404, the page rendered unstyled. Private/incognito
    *   did nothing because the cache is server-side.
    *
-   * Strategy:
-   *   - /_next/static/* — leave to Next. Turbopack dev chunks can go
-   *     stale if we force immutable caching here; Next already emits
-   *     the correct production headers for hashed assets.
+   *   A prior version of this fix applied the public s-maxage=300
+   *   override to every route indiscriminately, including every
+   *   authenticated app page and every auth-form page. Two problems
+   *   with that:
+   *
+   *   1. All the `(dashboard)` routes (/inbox, /contacts, /settings,
+   *      etc.) are client-rendered shells ("use client" pages with no
+   *      server data dependency) — Next.js already prerenders them as
+   *      *static*, so they were always going to be edge-cacheable one
+   *      way or another. The override didn't introduce that; it just
+   *      changed the TTL.
+   *   2. What the override — and Next's own default for these same
+   *      static pages — both miss is the CDN's cache *key*. Next's App
+   *      Router serves either full HTML or an internal RSC/flight
+   *      payload from the same URL, distinguished by an `RSC` request
+   *      header and an `_rsc` query param (see
+   *      docs/01-app/02-guides/cdn-caching.md). Hostinger's edge (visible
+   *      as `server: hcdn` in responses) does not appear to vary its
+   *      cache on either, so an RSC payload fetched by one client-side
+   *      navigation can get cached under the plain URL and then get
+   *      replayed as the page body for someone else's regular browser
+   *      load — which is exactly the raw flight-data text a user
+   *      reported seeing instead of the rendered dashboard.
+   *
+   *   Any page reachable via a `next/link` (client-side, RSC-prefetching)
+   *   navigation is exposed to that collision, which in this app is
+   *   every route except the bare `/`. So instead of trying to pick
+   *   safe routes to cache, only `/` (a static, session-independent
+   *   redirect to /dashboard — nothing in the app links to it, it's
+   *   only ever hit by a fresh browser navigation) keeps the public
+   *   short-TTL treatment. Every other page gets `no-store`, forcing
+   *   the CDN to always round-trip to origin — the low-traffic,
+   *   single-tenant nature of this deployment makes that an easy trade
+   *   for correctness. `no-store` also means a fresh deploy's new
+   *   chunk hashes are visible immediately, so the original chunk-
+   *   drift problem this file guards against can't recur on those
+   *   routes either.
+   *
+   * Strategy now:
+   *   - /_next/static/* — leave to Next; already immutable/hashed.
    *   - /api/*          — no-store. API responses are per-user and
    *     must never be shared across requests at the edge.
-   *   - Everything else — public, brief s-maxage + generous
-   *     stale-while-revalidate. The edge serves instantly from cache
-   *     for the first 5 min, then returns cached content while
-   *     refreshing in the background for up to 24 h. A deploy's
-   *     chunk-hash drift self-heals within ~5 min with no user-
-   *     visible latency.
-   *
-   *   Note: dynamic dashboard routes (/inbox, /contacts, /pipelines,
-   *   /broadcasts, etc.) are server-rendered per request — Next.js
-   *   and Supabase auth already prevent them from being served
-   *   from a shared cache. The s-maxage here is a ceiling; Next.js
-   *   and auth middleware still set `private` / `no-store` for
-   *   per-user responses.
+   *   - /               — public, short s-maxage + generous
+   *     stale-while-revalidate, so the very first hit after a deploy
+   *     self-heals within minutes with no user-visible latency.
+   *   - Everything else — no-store, unconditionally.
    *
    * Security headers are appended via a separate catch-all rule
    * below — Next.js merges headers from every matching rule, so
@@ -141,7 +168,7 @@ const nextConfig: NextConfig = {
         headers: [{ key: "Cache-Control", value: "no-store" }],
       },
       {
-        source: "/:path((?!_next/static|_next/image|api).*)",
+        source: "/",
         headers: [
           {
             key: "Cache-Control",
@@ -149,6 +176,10 @@ const nextConfig: NextConfig = {
               "public, max-age=0, s-maxage=300, stale-while-revalidate=86400",
           },
         ],
+      },
+      {
+        source: "/:path((?!_next/static|_next/image|api).+)",
+        headers: [{ key: "Cache-Control", value: "private, no-store" }],
       },
       {
         // Security headers on every response, including /_next/static
